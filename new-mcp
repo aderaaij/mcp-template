@@ -1,0 +1,266 @@
+#!/usr/bin/env python3
+"""new-mcp — scaffold a new ardencore MCP server (Python FastMCP) and its
+standardized systemd user unit, wired through the shared supergateway.
+
+Usage:
+  new-mcp <name> <port> [options]
+
+Examples:
+  # Python scaffold at ~/weather-mcp, port 8596, with a systemd unit:
+  new-mcp weather 8596 --description "Weather data via AI assistants"
+
+  # Same but TPM-sealed creds (adds LoadCredentialEncrypted to the unit):
+  new-mcp weather 8596 --tpm-creds
+
+  # Wrap an existing/third-party stdio MCP instead of scaffolding Python:
+  new-mcp notion 8597 --stdio '/path/to/node /path/to/notion-mcp' --env-file
+
+Options:
+  --description TEXT     One-line description (used in unit + instructions).
+  --dir PATH            Project dir. Default: ~/<slug> (python) — required for --stdio.
+  --stdio CMD           Skip Python scaffold; wrap this literal stdio command.
+  --tpm-creds           Add LoadCredentialEncrypted= line + secrets/ note.
+  --env-file            Add EnvironmentFile=-<dir>/.env to the unit (node/3rd-party).
+  --session-timeout MS  supergateway --sessionTimeout. Default 300000 (5 min).
+  --memory-max VAL      systemd MemoryMax. Default 256M.
+  --no-sync             Skip `uv sync` after scaffolding.
+  --enable              `systemctl --user enable --now` the service after writing.
+  --force               Overwrite an existing project dir / unit file.
+  -n, --dry-run         Print what would happen; write nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+TEMPLATE = HOME / "mcp-template"
+SKELETON = TEMPLATE / "skeleton"
+SYSTEMD_USER = HOME / ".config" / "systemd" / "user"
+NODE_BIN = "/home/arden/.nvm/versions/node/v24.6.0/bin/node"
+SUPERGATEWAY = "/home/arden/.local/share/mcp-common/node_modules/.bin/supergateway"
+UV_BIN = str(HOME / ".local" / "bin" / "uv")
+
+# Text files that get placeholder substitution during scaffold.
+SUBST_SUFFIXES = {".py", ".toml", ".env", ".example", ".md", ".gitignore", ".txt"}
+
+
+def die(msg: str) -> None:
+    print(f"error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def derive_names(raw: str) -> tuple[str, str, str]:
+    """Return (slug, base, env_prefix). slug always ends in -mcp."""
+    base = raw.strip().lower()
+    if base.endswith("-mcp"):
+        base = base[: -len("-mcp")]
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", base):
+        die(f"invalid name '{raw}': use lowercase letters, digits, hyphens")
+    slug = f"{base}-mcp"
+    env_prefix = base.upper().replace("-", "_") + "_"
+    return slug, base, env_prefix
+
+
+def used_ports() -> dict[int, str]:
+    """Map of port -> unit filename, scanned from existing user units."""
+    ports: dict[int, str] = {}
+    if not SYSTEMD_USER.is_dir():
+        return ports
+    pat = re.compile(r"--port\s+(\d+)")
+    for unit in SYSTEMD_USER.glob("*.service"):
+        try:
+            text = unit.read_text()
+        except OSError:
+            continue
+        for m in pat.finditer(text):
+            ports[int(m.group(1))] = unit.name
+    return ports
+
+
+def substitute(text: str, repl: dict[str, str]) -> str:
+    for k, v in repl.items():
+        text = text.replace(k, v)
+    return text
+
+
+def scaffold_python(dest: Path, repl: dict[str, str], dry: bool) -> None:
+    print(f"  scaffold Python project -> {dest}")
+    if dry:
+        return
+    for src in sorted(SKELETON.rglob("*")):
+        rel = src.relative_to(SKELETON)
+        target = dest / rel
+        if src.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if src.suffix in SUBST_SUFFIXES or src.name in {".gitignore", ".env.example"}:
+            target.write_text(substitute(src.read_text(), repl))
+        else:
+            shutil.copy2(src, target)
+    # Seed config/.env from the example so local dev works out of the box.
+    env_example = dest / "config" / ".env.example"
+    env_file = dest / "config" / ".env"
+    if env_example.exists() and not env_file.exists():
+        env_file.write_text(env_example.read_text())
+
+
+def build_unit(repl: dict[str, str], args, workdir: Path, stdio_cmd: str) -> str:
+    lines = [
+        "[Unit]",
+        f"Description={repl['__MCP_DESCRIPTION__']}",
+        "After=network.target",
+        "",
+        "[Service]",
+        "Type=simple",
+        f"WorkingDirectory={workdir}",
+    ]
+    if args.tpm_creds:
+        cred = f"{repl['__MCP_SLUG__']}-secrets"
+        lines.append(
+            f"LoadCredentialEncrypted={cred}:{workdir}/secrets/{cred}.cred"
+        )
+    if args.env_file:
+        lines.append(f"EnvironmentFile=-{workdir}/.env")
+    lines += [
+        f"Environment={repl['__MCP_ENV_PREFIX__']}LOG_LEVEL=INFO",
+        (
+            f'ExecStart={NODE_BIN} {SUPERGATEWAY} --stdio "{stdio_cmd}" '
+            f"--port {args.port} --host 0.0.0.0 --outputTransport streamableHttp "
+            f"--stateful --sessionTimeout {args.session_timeout}"
+        ),
+        "KillMode=control-group",
+        f"MemoryMax={args.memory_max}",
+        "Restart=always",
+        "RestartSec=5",
+        "",
+        "[Install]",
+        "WantedBy=default.target",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def main() -> None:
+    p = argparse.ArgumentParser(prog="new-mcp", add_help=True,
+                                description="Scaffold a new ardencore MCP server + systemd unit.")
+    p.add_argument("name", help="server name, e.g. 'weather' (slug becomes <name>-mcp)")
+    p.add_argument("port", type=int, help="HTTP port for supergateway (Tailscale-bound)")
+    p.add_argument("--description", default="")
+    p.add_argument("--dir", default="")
+    p.add_argument("--stdio", default="")
+    p.add_argument("--tpm-creds", action="store_true")
+    p.add_argument("--env-file", action="store_true")
+    p.add_argument("--session-timeout", default="300000")
+    p.add_argument("--memory-max", default="256M")
+    p.add_argument("--no-sync", action="store_true")
+    p.add_argument("--enable", action="store_true")
+    p.add_argument("--force", action="store_true")
+    p.add_argument("-n", "--dry-run", action="store_true")
+    args = p.parse_args()
+
+    if not SKELETON.is_dir():
+        die(f"template skeleton missing at {SKELETON}")
+    if not Path(SUPERGATEWAY).exists():
+        die(f"shared supergateway missing at {SUPERGATEWAY} "
+            f"(run: cd ~/.local/share/mcp-common && npm install)")
+
+    slug, base, env_prefix = derive_names(args.name)
+    description = args.description or f"{base} MCP Gateway"
+
+    # Port collision check.
+    taken = used_ports()
+    if args.port in taken and not args.force:
+        die(f"port {args.port} already used by {taken[args.port]} (use --force to override)")
+    if not (1024 <= args.port <= 65535):
+        die(f"port {args.port} out of range")
+
+    python_mode = not args.stdio
+    if python_mode:
+        workdir = Path(args.dir).expanduser() if args.dir else HOME / slug
+    else:
+        if not args.dir:
+            # For wrapped commands the WorkingDirectory still matters; default to HOME.
+            workdir = HOME
+        else:
+            workdir = Path(args.dir).expanduser()
+
+    unit_path = SYSTEMD_USER / f"{slug}.service"
+
+    repl = {
+        "__MCP_SLUG__": slug,
+        "__MCP_NAME__": base,
+        "__MCP_ENV_PREFIX__": env_prefix,
+        "__MCP_DESCRIPTION__": description,
+    }
+
+    stdio_cmd = args.stdio or f"{UV_BIN} run --directory {workdir} start"
+
+    print(f"new-mcp: {slug}  port={args.port}  mode={'python' if python_mode else 'stdio-wrap'}")
+    print(f"  workdir: {workdir}")
+    print(f"  unit:    {unit_path}")
+    print(f"  stdio:   {stdio_cmd}")
+
+    # --- Safety: existing targets ---
+    if python_mode and workdir.exists() and any(workdir.iterdir()) and not args.force:
+        die(f"{workdir} exists and is non-empty (use --force)")
+    if unit_path.exists() and not args.force:
+        die(f"{unit_path} exists (use --force)")
+
+    if args.dry_run:
+        print("\n--- unit that would be written ---")
+        print(build_unit(repl, args, workdir, stdio_cmd))
+        print("(dry run: nothing written)")
+        return
+
+    # --- Scaffold ---
+    if python_mode:
+        workdir.mkdir(parents=True, exist_ok=True)
+        scaffold_python(workdir, repl, dry=False)
+        if not args.no_sync:
+            print("  uv sync ...")
+            r = subprocess.run([UV_BIN, "sync"], cwd=workdir)
+            if r.returncode != 0:
+                print("  warning: uv sync failed; fix deps then re-run `uv sync`", file=sys.stderr)
+
+    # --- Write unit ---
+    SYSTEMD_USER.mkdir(parents=True, exist_ok=True)
+    unit_path.write_text(build_unit(repl, args, workdir, stdio_cmd))
+    print(f"  wrote {unit_path}")
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"])
+
+    if args.enable:
+        subprocess.run(["systemctl", "--user", "enable", "--now", slug])
+        print(f"  enabled + started {slug}")
+
+    # --- Next steps ---
+    print("\nDone. Next steps:")
+    step = 1
+    if python_mode:
+        print(f"  {step}. Edit app/tools/example.py -> your real tools; mount them in app/main.py")
+        step += 1
+        print(f"  {step}. Put credentials in {workdir}/config/.env (fields in app/config.py)")
+        step += 1
+    if args.tpm_creds:
+        cred = f"{slug}-secrets"
+        print(f"  {step}. TPM-seal creds:  systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs=\"\" \\")
+        print(f"           --name={cred} <plaintext-env> {workdir}/secrets/{cred}.cred")
+        step += 1
+    if not args.enable:
+        print(f"  {step}. systemctl --user enable --now {slug}")
+        step += 1
+    print(f"  {step}. Verify:  systemctl --user status {slug}  &&  curl -s localhost:{args.port}/")
+    step += 1
+    print(f"  {step}. Update ~/CLAUDE.md + run server-inventory (the inventory convention)")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,23 @@
+# Reference: the standardized unit the generator produces for a Python server.
+# Placeholders shown for documentation; `new-mcp` fills them in. Lines marked
+# OPTIONAL are emitted only with the relevant flag.
+[Unit]
+Description=__MCP_DESCRIPTION__
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+# OPTIONAL (--tpm-creds): decrypt TPM-sealed env into $CREDENTIALS_DIRECTORY at start.
+#LoadCredentialEncrypted=__MCP_SLUG__-secrets:__WORKDIR__/secrets/__MCP_SLUG__-secrets.cred
+# OPTIONAL (--env-file): for node/3rd-party MCPs that read process env directly.
+#EnvironmentFile=-__WORKDIR__/.env
+Environment=__MCP_ENV_PREFIX__LOG_LEVEL=INFO
+ExecStart=__NODE_BIN__ __SUPERGATEWAY__ --stdio "__STDIO_CMD__" --port __PORT__ --host 0.0.0.0 --outputTransport streamableHttp --stateful --sessionTimeout __SESSION_TIMEOUT__
+KillMode=control-group
+MemoryMax=__MEMORY_MAX__
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

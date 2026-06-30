@@ -1,0 +1,8 @@
+# Repo-level ignores. NOTE: skeleton/.gitignore is template *content* and is
+# committed on purpose — it ships inside each generated server.
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.log

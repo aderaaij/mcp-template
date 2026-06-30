@@ -1,0 +1,23 @@
+# Secrets — never commit real credentials
+.env
+*.env
+.env.*
+!.env.example
+!*.env.example
+# TPM-sealed creds live here (<slug>-secrets.cred); ignore the whole dir.
+secrets/*
+!secrets/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
