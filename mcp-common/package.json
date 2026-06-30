@@ -2,7 +2,7 @@
   "name": "mcp-common",
   "version": "1.0.0",
   "private": true,
-  "description": "Canonical supergateway install shared by all ardencore MCP gateways",
+  "description": "Shared, pinned supergateway install for MCP servers scaffolded by mcp-template",
   "dependencies": {
     "supergateway": "3.4.3"
   }

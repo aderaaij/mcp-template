@@ -4,7 +4,7 @@ Each tool domain is a `FastMCP` router mounted into the root server in
 app/main.py. Copy this file (e.g. to weather.py), rename the router, write
 `@<name>_router.tool` async functions, and `mcp.mount(<name>_router)` in main.
 
-Conventions used across the ardencore MCP servers:
+Conventions:
   - tools are `async def` and return plain dicts (JSON-serialisable)
   - catch exceptions and return `{"error": str(e)}` rather than raising, so a
     single failing tool call doesn't kill the session

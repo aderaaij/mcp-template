@@ -1,13 +1,34 @@
-# mcp-template — boilerplate for ardencore MCP servers
+# mcp-template — boilerplate for self-hosted MCP servers
 
-Every MCP gateway on ardencore has the same shape: a `systemctl --user` unit that
-runs **supergateway**, wrapping a **stdio** MCP and exposing it as
-**streamableHTTP** on a Tailscale-bound port. The Python servers (degiro,
-training, open-wearables, finance) additionally share an `app/main.py` +
-`app/config.py` + `app/tools/<domain>.py` layout.
+A small generator for spinning up [Model Context Protocol](https://modelcontextprotocol.io)
+servers that all share one shape: a `systemctl --user` unit that runs
+[**supergateway**](https://github.com/supercorp-ai/supergateway), wrapping a
+**stdio** MCP and exposing it as **streamable HTTP** on a local port. Python
+servers additionally share an `app/main.py` + `app/config.py` +
+`app/tools/<domain>.py` layout built on [FastMCP](https://github.com/jlowin/fastmcp).
 
-This package factors that out so a new server is "write the tools", not
-"copy-paste degiro and find-replace".
+`new-mcp` factors that out so a new server is "write the tools", not
+"copy-paste an existing one and find-replace".
+
+> The generated server binds `0.0.0.0` — put it behind your own LAN, VPN,
+> Tailscale, or reverse proxy; it does no auth of its own.
+
+## Requirements
+
+- `node` + `npm` (runs supergateway)
+- [`uv`](https://github.com/astral-sh/uv) (Python project + deps), for Python servers
+- `systemd` user services (Linux)
+
+## Install
+
+```bash
+git clone https://github.com/aderaaij/mcp-template.git ~/mcp-template
+~/mcp-template/mcp-common/bootstrap.sh          # -> ~/.local/share/mcp-common (npm ci)
+ln -sf ~/mcp-template/new-mcp ~/.local/bin/new-mcp
+```
+
+`bootstrap.sh` installs the shared, version-pinned supergateway (see
+[Shared supergateway](#shared-supergateway)).
 
 ## Quick start
 
@@ -23,38 +44,23 @@ curl -s localhost:8596/      # supergateway is up
 
 - `~/<name>-mcp/` — a Python FastMCP project from `skeleton/`:
   - `app/main.py` — FastMCP instance, mounts one router per tool domain
-  - `app/config.py` — pydantic-settings, TPM-aware env resolution (prefers
-    `$CREDENTIALS_DIRECTORY`, falls back to `config/.env`)
+  - `app/config.py` — pydantic-settings, credential resolution that prefers
+    `$CREDENTIALS_DIRECTORY` (systemd) and falls back to `config/.env`
   - `app/tools/example.py` — a `*_router` with a `ping` tool to copy
   - `pyproject.toml` with `start = "app.main:main"`, `config/.env(.example)`,
     `secrets/`, `.gitignore`
   - runs `uv sync`
 - `~/.config/systemd/user/<name>-mcp.service` — the standardized unit, pointing
-  at the **shared** supergateway (`~/.local/share/mcp-common/`), then
-  `systemctl --user daemon-reload`.
+  at the shared supergateway, then `systemctl --user daemon-reload`.
 
-## Why a shared supergateway
+## Shared supergateway
 
-Before this template, every Python service's `ExecStart` reached into
-`~/.local/share/todoist-mcp/node_modules/.bin/supergateway` — so all servers
-secretly depended on the todoist install. The generator points new units at the
-canonical `~/.local/share/mcp-common/node_modules/.bin/supergateway` instead.
-Update it in one place: `cd ~/.local/share/mcp-common && npm update` (then bump
-the pin in `mcp-common/package.json` here and re-run bootstrap).
-
-## Bootstrap on a fresh machine
-
-The shared supergateway install is reproducible from the pinned lockfile in
-`mcp-common/`:
-
-```bash
-git clone git@github.com:aderaaij/mcp-template.git ~/mcp-template
-~/mcp-template/mcp-common/bootstrap.sh          # -> ~/.local/share/mcp-common (npm ci)
-ln -sf ~/mcp-template/new-mcp ~/.local/bin/new-mcp
-```
-
-supergateway is pinned to a specific version (currently 3.4.3) so every server
-built this way runs the same gateway.
+All generated units point at one canonical supergateway install
+(`~/.local/share/mcp-common/`, overridable with `$MCP_COMMON_DIR`) rather than
+each server bundling its own. That keeps every server on the same gateway
+version and gives you a single place to upgrade. It's pinned in
+`mcp-common/package.json` + `package-lock.json` and reproduced by
+`mcp-common/bootstrap.sh` (`npm ci`). To bump: edit the pin, re-run bootstrap.
 
 ## Standardized unit defaults
 
@@ -80,46 +86,47 @@ built this way runs the same gateway.
 The generator refuses a port already used by another unit (scans
 `~/.config/systemd/user/*.service`) unless `--force`.
 
-## TPM-sealed credentials
+## TPM-sealed credentials (optional)
 
-With `--tpm-creds` the unit gets a `LoadCredentialEncrypted=<slug>-secrets:...`
-line; `app/config.py` already prefers `$CREDENTIALS_DIRECTORY/<slug>-secrets`.
-Seal real values with:
+On a machine with a TPM, `--tpm-creds` adds a
+`LoadCredentialEncrypted=<slug>-secrets:...` line to the unit;
+`app/config.py` already prefers `$CREDENTIALS_DIRECTORY/<slug>-secrets`. Seal
+real values with:
 
 ```bash
 systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs="" \
   --name=<slug>-secrets <plaintext-env> ~/<slug>/secrets/<slug>-secrets.cred
 ```
 
-Keep a copy of the raw values off-TPM (1Password) — a TPM clear makes the blob
-unrecoverable. (Same pattern as the DeGiro MCP; see `~/CLAUDE.md`.)
+Keep a copy of the raw values in your password manager — a TPM clear makes the
+sealed blob unrecoverable. (Without `--tpm-creds`, credentials just live in
+`config/.env`.)
 
 ## Wrapping a non-Python / third-party MCP
 
 ```bash
 new-mcp notion 8597 \
-  --stdio '/home/arden/.nvm/versions/node/v24.6.0/bin/node /path/to/notion-mcp' \
+  --stdio "$(command -v node) /path/to/notion-mcp" \
   --env-file --description "Notion MCP"
 ```
 
 No Python project is scaffolded; only the unit is written. Use `--env-file` so
 the wrapped process reads `<dir>/.env`.
 
-## After creating a server
-
-Update `~/CLAUDE.md` (Containers/Services + Key Ports tables) and run
-`server-inventory` — that's the house convention for tracking what runs where.
-
 ## Layout
 
 ```
 mcp-template/
-  new-mcp                     # the generator (symlinked to ~/.local/bin/new-mcp)
+  new-mcp                     # the generator (symlink onto your PATH)
   skeleton/                   # the Python project copied + substituted per server
   systemd/mcp.service.example # reference unit with placeholders
-  README.md
+  mcp-common/                 # pinned supergateway: package.json + lockfile + bootstrap.sh
 ```
 
 Placeholders substituted during scaffold: `__MCP_SLUG__` (e.g. `weather-mcp`),
 `__MCP_NAME__` (`weather`), `__MCP_ENV_PREFIX__` (`WEATHER_`),
 `__MCP_DESCRIPTION__`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

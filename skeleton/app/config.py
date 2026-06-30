@@ -8,7 +8,7 @@ Credentials/config are read from the env file (or process environment) with the
   2. Otherwise the plaintext `config/.env` next to this project (local/dev,
      or non-TPM systemd runs).
 
-This mirrors the pattern used by the other ardencore MCP servers. To TPM-seal:
+To TPM-seal the credentials at rest (optional):
   systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs="" \
     --name=__MCP_SLUG__-secrets <plaintext-env> secrets/__MCP_SLUG__-secrets.cred
 and add `LoadCredentialEncrypted=__MCP_SLUG__-secrets:.../secrets/__MCP_SLUG__-secrets.cred`
