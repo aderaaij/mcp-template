@@ -1,0 +1,143 @@
+#!/usr/bin/env python3
+"""mcp-health — health-check every MCP gateway managed as a systemd user unit.
+
+Discovers `~/.config/systemd/user/*.service` units whose ExecStart runs
+supergateway, then for each does the same handshake a real client does:
+`initialize` -> `notifications/initialized` -> `tools/list`, reporting whether
+the service is active, its advertised server name, and its tool count.
+
+Exit status is non-zero if any discovered server fails — usable from cron/checks.
+
+Usage:
+  mcp-health [--json] [--timeout SECONDS] [--unit-dir DIR]
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+UNIT_DIR_DEFAULT = Path.home() / ".config" / "systemd" / "user"
+PORT_RE = re.compile(r"--port\s+(\d+)")
+
+
+def discover(unit_dir: Path) -> list[tuple[str, int]]:
+    """Return (service_name, port) for each supergateway-backed MCP unit."""
+    found = []
+    for unit in sorted(unit_dir.glob("*.service")):
+        if unit.name.endswith(".service") and "-auth" in unit.name:
+            continue  # auth proxies are not MCP servers
+        try:
+            text = unit.read_text()
+        except OSError:
+            continue
+        if "supergateway" not in text:
+            continue
+        m = PORT_RE.search(text)
+        if not m:
+            continue
+        found.append((unit.name[: -len(".service")], int(m.group(1))))
+    return found
+
+
+def post(url: str, payload: dict, session: str | None, timeout: float):
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "application/json, text/event-stream")
+    if session:
+        req.add_header("mcp-session-id", session)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        body = r.read().decode("utf-8", "replace")
+        sid = r.headers.get("mcp-session-id")
+    msgs = []
+    for line in body.splitlines():
+        if line.startswith("data:"):
+            try:
+                msgs.append(json.loads(line[5:].strip()))
+            except json.JSONDecodeError:
+                pass
+    return sid, msgs
+
+
+def _result(msgs, key):
+    for m in msgs:
+        if isinstance(m, dict) and isinstance(m.get("result"), dict) and key in m["result"]:
+            return m["result"][key]
+    return None
+
+
+def is_active(unit: str) -> str:
+    try:
+        out = subprocess.run(
+            ["systemctl", "--user", "is-active", unit],
+            capture_output=True, text=True, timeout=5,
+        )
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def check(name: str, port: int, timeout: float) -> dict:
+    url = f"http://localhost:{port}/mcp"
+    row = {"service": name, "port": port, "active": is_active(name),
+           "server": None, "tools": None, "ok": False, "error": None}
+    try:
+        sid, msgs = post(url, {
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "mcp-health", "version": "1"}},
+        }, None, timeout)
+        info = _result(msgs, "serverInfo")
+        if info:
+            row["server"] = info.get("name")
+        if sid:
+            post(url, {"jsonrpc": "2.0", "method": "notifications/initialized"}, sid, timeout)
+            _, tmsgs = post(url, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, sid, timeout)
+            tools = _result(tmsgs, "tools")
+            if tools is not None:
+                row["tools"] = len(tools)
+        row["ok"] = row["server"] is not None
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        row["error"] = str(getattr(e, "reason", e))
+    return row
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(prog="mcp-health", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument("--unit-dir", default=str(UNIT_DIR_DEFAULT))
+    args = ap.parse_args()
+
+    servers = discover(Path(args.unit_dir).expanduser())
+    if not servers:
+        print("no supergateway-backed MCP units found", file=sys.stderr)
+        sys.exit(2)
+
+    rows = [check(n, p, args.timeout) for n, p in servers]
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    else:
+        print(f"{'SERVICE':<22} {'PORT':<6} {'ACTIVE':<9} {'TOOLS':<6} {'SERVER':<22} STATUS")
+        for r in rows:
+            status = "OK" if r["ok"] else f"FAIL ({r['error'] or 'no MCP response'})"
+            tools = "-" if r["tools"] is None else str(r["tools"])
+            print(f"{r['service']:<22} {r['port']:<6} {r['active']:<9} {tools:<6} "
+                  f"{(r['server'] or '-'):<22} {status}")
+        bad = [r['service'] for r in rows if not r['ok']]
+        print(f"\n{len(rows) - len(bad)}/{len(rows)} healthy" + (f"; FAILING: {', '.join(bad)}" if bad else ""))
+
+    sys.exit(1 if any(not r["ok"] for r in rows) else 0)
+
+
+if __name__ == "__main__":
+    main()

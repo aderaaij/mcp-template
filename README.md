@@ -113,11 +113,44 @@ new-mcp notion 8597 \
 No Python project is scaffolded; only the unit is written. Use `--env-file` so
 the wrapped process reads `<dir>/.env`.
 
+## Companion tools
+
+Symlink these onto your PATH alongside `new-mcp`:
+
+```bash
+ln -sf ~/mcp-template/mcp-health     ~/.local/bin/mcp-health
+ln -sf ~/mcp-template/mcp-seal-creds ~/.local/bin/mcp-seal-creds
+```
+
+**`mcp-health`** — health-checks the whole fleet. Auto-discovers every
+supergateway-backed unit in `~/.config/systemd/user`, then does a real client
+handshake (`initialize` → `tools/list`) against each and reports active state +
+tool count. Exits non-zero if any server fails, so it drops straight into cron
+or a status check. `--json` for machine output.
+
+```
+SERVICE                PORT   ACTIVE    TOOLS  SERVER                 STATUS
+weather-mcp            8596   active    7      weather-mcp            OK
+...
+9/9 healthy
+```
+
+**`mcp-seal-creds`** — TPM2-seals a server's credentials into the
+`<slug>-secrets.cred` blob the unit decrypts via `LoadCredentialEncrypted=`
+(pairs with `new-mcp --tpm-creds` and the skeleton's `app/config.py`). Plaintext
+is staged only in `/dev/shm` and shredded; the sealed blob is safe to keep.
+
+```bash
+printf 'WEATHER_API_KEY=...\n' | mcp-seal-creds weather   # or: mcp-seal-creds weather env-file
+```
+
 ## Layout
 
 ```
 mcp-template/
   new-mcp                     # the generator (symlink onto your PATH)
+  mcp-health                  # fleet health check (initialize -> tools/list sweep)
+  mcp-seal-creds              # TPM2-seal a server's credentials blob
   skeleton/                   # the Python project copied + substituted per server
   systemd/mcp.service.example # reference unit with placeholders
   mcp-common/                 # pinned supergateway: package.json + lockfile + bootstrap.sh

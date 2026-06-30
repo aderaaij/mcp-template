@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# mcp-seal-creds — TPM2-seal an MCP server's credentials into a systemd-creds
+# blob that the unit decrypts at runtime via LoadCredentialEncrypted=.
+#
+# The plaintext is staged only in tmpfs (/dev/shm) and shredded afterwards; the
+# sealed .cred blob is safe to keep (and to commit-ignore in secrets/).
+#
+# Usage:
+#   mcp-seal-creds <name> <plaintext-env-file>     # seal a KEY=VALUE file
+#   mcp-seal-creds <name> [--dir PROJECT] < env     # read plaintext from stdin
+#
+# Produces <project>/secrets/<slug>-secrets.cred (project default: ~/<slug>) and
+# prints the unit line to add. The credential name is <slug>-secrets, matching
+# the skeleton's app/config.py and `new-mcp --tpm-creds`.
+set -euo pipefail
+
+usage() { grep '^# ' "$0" | cut -c3-; exit "${1:-0}"; }
+
+name=""; dir=""; src=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage 0 ;;
+    --dir) dir="${2:?--dir needs a path}"; shift 2 ;;
+    -*) echo "unknown flag: $1" >&2; usage 1 ;;
+    *) if [ -z "$name" ]; then name="$1"; elif [ -z "$src" ]; then src="$1"; fi; shift ;;
+  esac
+done
+[ -n "$name" ] || usage 1
+
+base="${name%-mcp}"; slug="${base}-mcp"; cred="${slug}-secrets"
+dir="${dir:-$HOME/$slug}"
+out="$dir/secrets/$cred.cred"
+
+command -v systemd-creds >/dev/null || { echo "error: systemd-creds not found (needs systemd 250+)" >&2; exit 1; }
+systemd-creds has-tpm2 >/dev/null 2>&1 || echo "warning: 'systemd-creds has-tpm2' did not confirm a usable TPM2 — sealing may fail" >&2
+
+mkdir -p "$dir/secrets"
+
+stage="$(mktemp "/dev/shm/$cred.XXXXXX")"; chmod 600 "$stage"
+cleanup() { command -v shred >/dev/null 2>&1 && shred -u "$stage" 2>/dev/null || rm -f "$stage"; }
+trap cleanup EXIT
+
+if [ -n "$src" ]; then
+  cat -- "$src" > "$stage"
+elif [ ! -t 0 ]; then
+  cat > "$stage"          # piped stdin
+else
+  echo "Enter KEY=VALUE lines, end with Ctrl-D:" >&2
+  cat > "$stage"
+fi
+[ -s "$stage" ] || { echo "error: no plaintext provided" >&2; exit 1; }
+
+systemd-creds encrypt --with-key=tpm2 --tpm2-pcrs="" --name="$cred" "$stage" "$out"
+chmod 600 "$out"
+
+echo "Sealed -> $out"
+echo
+echo "Unit line (new-mcp --tpm-creds already adds this):"
+echo "  LoadCredentialEncrypted=$cred:$out"
+echo "Then: systemctl --user restart $slug"
+echo
+echo "Keep the raw values in your password manager — a TPM clear/board swap makes the blob unrecoverable."
