@@ -65,8 +65,12 @@ version and gives you a single place to upgrade. It's pinned in
 ## Standardized unit defaults
 
 `--port`, `--host 0.0.0.0`, `--outputTransport streamableHttp`, `--stateful`,
-`--sessionTimeout 300000` (5 min), `MemoryMax 256M`, `Restart=always`,
-`KillMode=control-group`. Override with `--session-timeout` / `--memory-max`.
+`--sessionTimeout 300000` (5 min), `MemoryMax 512M`, `MemorySwapMax=0`,
+`Restart=always`, `KillMode=control-group`. Override with `--session-timeout` /
+`--memory-max`. `MemorySwapMax=0` matters: stateful supergateway spawns one
+child process per session, and without it a unit that hits its memory cap
+swap-thrashes (unresponsive but "active") instead of OOM-killing and
+restarting cleanly.
 
 ## Options
 

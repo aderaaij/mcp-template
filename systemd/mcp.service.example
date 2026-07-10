@@ -16,6 +16,7 @@ Environment=__MCP_ENV_PREFIX__LOG_LEVEL=INFO
 ExecStart=__NODE_BIN__ __SUPERGATEWAY__ --stdio "__STDIO_CMD__" --port __PORT__ --host 0.0.0.0 --outputTransport streamableHttp --stateful --sessionTimeout __SESSION_TIMEOUT__
 KillMode=control-group
 MemoryMax=__MEMORY_MAX__
+MemorySwapMax=0
 Restart=always
 RestartSec=5
 

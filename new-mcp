@@ -22,7 +22,8 @@ Options:
   --tpm-creds           Add LoadCredentialEncrypted= line + secrets/ note.
   --env-file            Add EnvironmentFile=-<dir>/.env to the unit (node/3rd-party).
   --session-timeout MS  supergateway --sessionTimeout. Default 300000 (5 min).
-  --memory-max VAL      systemd MemoryMax. Default 256M.
+  --memory-max VAL      systemd MemoryMax. Default 512M (MemorySwapMax=0 always set:
+                        hitting the cap OOM-kills + restarts instead of swap-thrashing).
   --no-sync             Skip `uv sync` after scaffolding.
   --enable              `systemctl --user enable --now` the service after writing.
   --force               Overwrite an existing project dir / unit file.
@@ -157,6 +158,7 @@ def build_unit(repl: dict[str, str], args, workdir: Path, stdio_cmd: str, node_b
         ),
         "KillMode=control-group",
         f"MemoryMax={args.memory_max}",
+        "MemorySwapMax=0",
         "Restart=always",
         "RestartSec=5",
         "",
@@ -178,7 +180,7 @@ def main() -> None:
     p.add_argument("--tpm-creds", action="store_true")
     p.add_argument("--env-file", action="store_true")
     p.add_argument("--session-timeout", default="300000")
-    p.add_argument("--memory-max", default="256M")
+    p.add_argument("--memory-max", default="512M")
     p.add_argument("--no-sync", action="store_true")
     p.add_argument("--enable", action="store_true")
     p.add_argument("--force", action="store_true")
