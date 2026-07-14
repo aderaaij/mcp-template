@@ -1,0 +1,6 @@
+[Unit]
+Description=MCP gateway leak safety net (restart units nearing MemoryMax)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/mcp-guard

@@ -62,6 +62,35 @@ version and gives you a single place to upgrade. It's pinned in
 `mcp-common/package.json` + `package-lock.json` and reproduced by
 `mcp-common/bootstrap.sh` (`npm ci`). To bump: edit the pin, re-run bootstrap.
 
+### Patched: session/child-process leak (supergateway 3.4.3)
+
+`bootstrap.sh` applies `mcp-common/patches/` on top of the pinned install. This
+is not optional — unpatched, every unit eventually OOM-kills itself and clients
+report *"could not attach to MCP server X"* while the server itself is perfectly
+healthy. Upstream 3.4.3 (current latest) leaks one child process per session, for
+two independent reasons:
+
+1. **`--sessionTimeout` is not an idle timeout.** `SessionAccessCounter` arms its
+   cleanup timer only when the access count reaches exactly 0, and any new access
+   clears it. A client holding an SSE stream reconnects every couple of minutes,
+   so the timer is armed and disarmed forever and the session never expires. No
+   value of `--sessionTimeout` fixes this.
+2. **`child.kill()` only kills the shell.** `spawn(cmd, {shell: true})` yields
+   `/bin/sh -c ...`; when sh can't exec the command away (e.g. `npx foo` → npm
+   exec → sh → node), SIGTERM hits the outer shell and orphans the real server.
+
+The patch reaps sessions idle past `SUPERGATEWAY_SESSION_IDLE_MS` (default 30m),
+counting **only POST requests as activity — never SSE GETs**, kills the child's
+whole **process group**, and returns **404** (not 400) for an expired session so
+clients re-initialize per the MCP spec. Also tunable: `SUPERGATEWAY_SESSION_MAX_AGE_MS`
+(12h), `SUPERGATEWAY_MAX_SESSIONS` (8), `SUPERGATEWAY_SWEEP_MS` (60s).
+
+`npm ci` reverts the patch, so bootstrap re-applies it every run. `patches/apply.sh`
+is pinned to the exact upstream version it was written against and **refuses to run**
+if the pin moves — so bumping supergateway fails loudly instead of silently
+reintroducing the leak. On a bump: review the patch against the new source, then
+update `PATCHED_VERSION` in `patches/apply.sh`.
+
 ## Standardized unit defaults
 
 `--port`, `--host 0.0.0.0`, `--outputTransport streamableHttp`, `--stateful`,
@@ -124,6 +153,7 @@ Symlink these onto your PATH alongside `new-mcp`:
 ```bash
 ln -sf ~/mcp-template/mcp-health     ~/.local/bin/mcp-health
 ln -sf ~/mcp-template/mcp-seal-creds ~/.local/bin/mcp-seal-creds
+ln -sf ~/mcp-template/mcp-guard      ~/.local/bin/mcp-guard
 ```
 
 **`mcp-health`** — health-checks the whole fleet. Auto-discovers every
@@ -137,6 +167,16 @@ SERVICE                PORT   ACTIVE    TOOLS  SERVER                 STATUS
 weather-mcp            8596   active    7      weather-mcp            OK
 ...
 9/9 healthy
+```
+
+**`mcp-guard`** — safety net for the child-process leak above. Restarts any MCP
+unit whose cgroup memory exceeds 75% of its `MemoryMax` (`$MCP_GUARD_THRESHOLD_PCT`),
+i.e. catches a leak *before* the OOM killer does. Silent when healthy, so it runs
+happily on a timer; `--dry-run` to see what it would do.
+
+```bash
+# every 15 min via a systemd user timer
+systemctl --user enable --now mcp-guard.timer
 ```
 
 **`mcp-seal-creds`** — TPM2-seals a server's credentials into the
@@ -155,9 +195,12 @@ mcp-template/
   new-mcp                     # the generator (symlink onto your PATH)
   mcp-health                  # fleet health check (initialize -> tools/list sweep)
   mcp-seal-creds              # TPM2-seal a server's credentials blob
+  mcp-guard                   # restart units nearing MemoryMax (leak safety net)
   skeleton/                   # the Python project copied + substituted per server
   systemd/mcp.service.example # reference unit with placeholders
+  systemd/mcp-guard.{service,timer}
   mcp-common/                 # pinned supergateway: package.json + lockfile + bootstrap.sh
+  mcp-common/patches/         # child-process-leak patch, re-applied by bootstrap.sh
 ```
 
 Placeholders substituted during scaffold: `__MCP_SLUG__` (e.g. `weather-mcp`),

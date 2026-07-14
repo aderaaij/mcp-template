@@ -15,6 +15,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import re
 import subprocess
@@ -106,6 +107,12 @@ def check(name: str, port: int, timeout: float) -> dict:
         row["ok"] = row["server"] is not None
     except (urllib.error.URLError, OSError, TimeoutError) as e:
         row["error"] = str(getattr(e, "reason", e))
+    except http.client.HTTPException as e:
+        # A server OOM-killed mid-response truncates the chunked body, raising
+        # IncompleteRead. That is not an OSError, so it used to escape this
+        # handler and crash the whole run — losing the report precisely when a
+        # server was unhealthy, which is when the report matters most.
+        row["error"] = f"{type(e).__name__}: server closed the response early (died mid-request?)"
     return row
 
 

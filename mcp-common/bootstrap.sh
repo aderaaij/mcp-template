@@ -13,5 +13,10 @@ cp "$SRC/package.json" "$SRC/package-lock.json" "$DEST/"
 cd "$DEST"
 npm ci
 
+# npm ci restores pristine upstream, so the child-process-leak patch must be
+# re-applied every time. Not optional: unpatched, every MCP unit OOM-kills itself
+# once a few sessions accumulate.
+"$SRC/patches/apply.sh" "$DEST"
+
 echo "Shared supergateway installed at: $DEST"
 "$DEST/node_modules/.bin/supergateway" --version || true
