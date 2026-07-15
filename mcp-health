@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """mcp-health — health-check every MCP gateway managed as a systemd user unit.
 
-Discovers `~/.config/systemd/user/*.service` units whose ExecStart runs
-supergateway, then for each does the same handshake a real client does:
+Discovers `~/.config/systemd/user/*-mcp.service` units that serve MCP over HTTP
+— either supergateway-wrapped stdio (`--port N`) or native FastMCP HTTP
+(`Environment=MCP_PORT=N`) — then for each does the same handshake a real
+client does:
 `initialize` -> `notifications/initialized` -> `tools/list`, reporting whether
 the service is active, its advertised server name, and its tool count.
 
@@ -25,24 +27,23 @@ import urllib.request
 from pathlib import Path
 
 UNIT_DIR_DEFAULT = Path.home() / ".config" / "systemd" / "user"
-PORT_RE = re.compile(r"--port\s+(\d+)")
+PORT_RE = re.compile(r"--port\s+(\d+)")          # supergateway-wrapped units
+ENV_PORT_RE = re.compile(r"\bMCP_PORT=(\d+)")    # native FastMCP HTTP units
 
 
 def discover(unit_dir: Path) -> list[tuple[str, int]]:
-    """Return (service_name, port) for each supergateway-backed MCP unit."""
+    """Return (service_name, port) for each MCP unit (gateway-wrapped or native)."""
     found = []
-    for unit in sorted(unit_dir.glob("*.service")):
-        if unit.name.endswith(".service") and "-auth" in unit.name:
+    for unit in sorted(unit_dir.glob("*-mcp.service")):
+        if "-auth" in unit.name:
             continue  # auth proxies are not MCP servers
         try:
             text = unit.read_text()
         except OSError:
             continue
-        if "supergateway" not in text:
-            continue
-        m = PORT_RE.search(text)
+        m = PORT_RE.search(text) or ENV_PORT_RE.search(text)
         if not m:
-            continue
+            continue  # no port to probe (e.g. the cloudflared tunnel unit)
         found.append((unit.name[: -len(".service")], int(m.group(1))))
     return found
 
