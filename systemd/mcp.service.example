@@ -1,6 +1,9 @@
-# Reference: the standardized unit the generator produces for a Python server.
-# Placeholders shown for documentation; `new-mcp` fills them in. Lines marked
-# OPTIONAL are emitted only with the relevant flag.
+# Reference: the standardized units the generator produces. Placeholders shown
+# for documentation; `new-mcp` fills them in. Lines marked OPTIONAL are emitted
+# only with the relevant flag.
+#
+# Default mode (Python scaffold): native FastMCP streamable HTTP, in-process —
+# no gateway, no per-session child processes. Endpoint: http://<host>:<port>/mcp
 [Unit]
 Description=__MCP_DESCRIPTION__
 After=network.target
@@ -13,8 +16,14 @@ WorkingDirectory=__WORKDIR__
 # OPTIONAL (--env-file): for node/3rd-party MCPs that read process env directly.
 #EnvironmentFile=-__WORKDIR__/.env
 Environment=__MCP_ENV_PREFIX__LOG_LEVEL=INFO
-ExecStart=__NODE_BIN__ __SUPERGATEWAY__ --stdio "__STDIO_CMD__" --port __PORT__ --host 0.0.0.0 --outputTransport streamableHttp --stateful --sessionTimeout __SESSION_TIMEOUT__
+Environment=MCP_TRANSPORT=http
+Environment=MCP_HOST=0.0.0.0
+Environment=MCP_PORT=__PORT__
+ExecStart=__WORKDIR__/.venv/bin/start
+# --stdio wrap mode replaces the three Environment=MCP_* lines + ExecStart above with:
+#ExecStart=__NODE_BIN__ __SUPERGATEWAY__ --stdio "__STDIO_CMD__" --port __PORT__ --host 0.0.0.0 --outputTransport streamableHttp --stateful --sessionTimeout __SESSION_TIMEOUT__
 KillMode=control-group
+# 512M native (single process) / 1G wrap (one child per session; bursts add up).
 MemoryMax=__MEMORY_MAX__
 MemorySwapMax=0
 Restart=always

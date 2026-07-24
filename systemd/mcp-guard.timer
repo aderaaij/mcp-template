@@ -1,10 +1,10 @@
 [Unit]
-Description=Run mcp-guard every 15 minutes
+Description=Run mcp-guard every 5 minutes
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=*:0/5
 Persistent=true
-AccuracySec=1min
+AccuracySec=30s
 
 [Install]
 WantedBy=timers.target

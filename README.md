@@ -1,11 +1,14 @@
 # mcp-template — boilerplate for self-hosted MCP servers
 
 A small generator for spinning up [Model Context Protocol](https://modelcontextprotocol.io)
-servers that all share one shape: a `systemctl --user` unit that runs
-[**supergateway**](https://github.com/supercorp-ai/supergateway), wrapping a
-**stdio** MCP and exposing it as **streamable HTTP** on a local port. Python
-servers additionally share an `app/main.py` + `app/config.py` +
-`app/tools/<domain>.py` layout built on [FastMCP](https://github.com/jlowin/fastmcp).
+servers that all share one shape: a `systemctl --user` unit exposing
+**streamable HTTP** on a local port. Python servers are built on
+[FastMCP](https://github.com/jlowin/fastmcp) and serve HTTP **natively,
+in-process** (endpoint `/mcp`) — no gateway, no per-session child processes —
+sharing an `app/main.py` + `app/config.py` + `app/tools/<domain>.py` layout.
+Third-party **stdio** MCPs are wrapped through a shared, patched
+[**supergateway**](https://github.com/supercorp-ai/supergateway) install
+(`--stdio` mode) instead.
 
 `new-mcp` factors that out so a new server is "write the tools", not
 "copy-paste an existing one and find-replace".
@@ -15,8 +18,8 @@ servers additionally share an `app/main.py` + `app/config.py` +
 
 ## Requirements
 
-- `node` + `npm` (runs supergateway)
 - [`uv`](https://github.com/astral-sh/uv) (Python project + deps), for Python servers
+- `node` + `npm` (runs supergateway) — only needed for `--stdio` wraps
 - `systemd` user services (Linux)
 
 ## Install
@@ -37,7 +40,7 @@ new-mcp weather 8596 --description "Weather data via AI assistants"
 # edit ~/weather-mcp/app/tools/example.py -> real tools
 # put creds in ~/weather-mcp/config/.env
 systemctl --user enable --now weather-mcp
-curl -s localhost:8596/      # supergateway is up
+mcp-health                   # real initialize -> tools/list handshake
 ```
 
 ## What it generates
@@ -50,12 +53,14 @@ curl -s localhost:8596/      # supergateway is up
   - `pyproject.toml` with `start = "app.main:main"`, `config/.env(.example)`,
     `secrets/`, `.gitignore`
   - runs `uv sync`
-- `~/.config/systemd/user/<name>-mcp.service` — the standardized unit, pointing
-  at the shared supergateway, then `systemctl --user daemon-reload`.
+- `~/.config/systemd/user/<name>-mcp.service` — the standardized unit
+  (`MCP_TRANSPORT=http`, `ExecStart=<dir>/.venv/bin/start` — native FastMCP
+  HTTP; `--stdio` wraps point at the shared supergateway instead), then
+  `systemctl --user daemon-reload`.
 
-## Shared supergateway
+## Shared supergateway (`--stdio` wraps only)
 
-All generated units point at one canonical supergateway install
+Wrap units point at one canonical supergateway install
 (`~/.local/share/mcp-common/`, overridable with `$MCP_COMMON_DIR`) rather than
 each server bundling its own. That keeps every server on the same gateway
 version and gives you a single place to upgrade. It's pinned in
@@ -79,11 +84,11 @@ two independent reasons:
    `/bin/sh -c ...`; when sh can't exec the command away (e.g. `npx foo` → npm
    exec → sh → node), SIGTERM hits the outer shell and orphans the real server.
 
-The patch reaps sessions idle past `SUPERGATEWAY_SESSION_IDLE_MS` (default 30m),
-counting **only POST requests as activity — never SSE GETs**, kills the child's
-whole **process group**, and returns **404** (not 400) for an expired session so
-clients re-initialize per the MCP spec. Also tunable: `SUPERGATEWAY_SESSION_MAX_AGE_MS`
-(12h), `SUPERGATEWAY_MAX_SESSIONS` (8), `SUPERGATEWAY_SWEEP_MS` (60s).
+The patch reaps sessions idle past `--sessionIdleMs` (default 30m), counting
+**only POST requests as activity — never SSE GETs**, kills the child's whole
+**process group**, and returns **404** (not 400) for an expired session so
+clients re-initialize per the MCP spec. Also tunable: `--sessionMaxAgeMs`
+(12h), `--maxSessions` (64), `--sweepIntervalMs` (60s).
 
 `npm ci` reverts the patch, so bootstrap re-applies it every run. `patches/apply.sh`
 is pinned to the exact upstream version it was written against and **refuses to run**
@@ -93,13 +98,16 @@ update `PATCHED_VERSION` in `patches/apply.sh`.
 
 ## Standardized unit defaults
 
-`--port`, `--host 0.0.0.0`, `--outputTransport streamableHttp`, `--stateful`,
-`--sessionTimeout 300000` (5 min), `MemoryMax 512M`, `MemorySwapMax=0`,
-`Restart=always`, `KillMode=control-group`. Override with `--session-timeout` /
-`--memory-max`. `MemorySwapMax=0` matters: stateful supergateway spawns one
-child process per session, and without it a unit that hits its memory cap
-swap-thrashes (unresponsive but "active") instead of OOM-killing and
-restarting cleanly.
+Both modes: bind `0.0.0.0`, `MemorySwapMax=0`, `Restart=always`,
+`KillMode=control-group`. Native Python units: `MCP_TRANSPORT=http`,
+`MCP_HOST`/`MCP_PORT`, `MemoryMax 512M` (a single process — ample). Wrap
+units: `--outputTransport streamableHttp`, `--stateful`, `--sessionTimeout
+300000` (5 min), `MemoryMax 1G` — a stateful gateway spawns one child process
+per session, so a burst of parallel clients (agent fan-outs) can hold many
+live children at once; size the cap for that. Override with
+`--session-timeout` / `--memory-max`. `MemorySwapMax=0` matters: without it a
+unit that hits its memory cap swap-thrashes (unresponsive but "active")
+instead of OOM-killing and restarting cleanly.
 
 ## Options
 
@@ -157,8 +165,9 @@ ln -sf ~/mcp-template/mcp-guard      ~/.local/bin/mcp-guard
 ```
 
 **`mcp-health`** — health-checks the whole fleet. Auto-discovers every
-supergateway-backed unit in `~/.config/systemd/user`, then does a real client
-handshake (`initialize` → `tools/list`) against each and reports active state +
+`*-mcp.service` unit in `~/.config/systemd/user` (native `MCP_PORT=N` and
+gateway `--port N` alike), then does a real client handshake
+(`initialize` → `tools/list`) against each and reports active state +
 tool count. Exits non-zero if any server fails, so it drops straight into cron
 or a status check. `--json` for machine output.
 
@@ -175,7 +184,8 @@ i.e. catches a leak *before* the OOM killer does. Silent when healthy, so it run
 happily on a timer; `--dry-run` to see what it would do.
 
 ```bash
-# every 15 min via a systemd user timer
+# every 5 min via a systemd user timer (a burst of parallel clients can
+# outgrow the cap in well under 15)
 systemctl --user enable --now mcp-guard.timer
 ```
 
@@ -205,7 +215,7 @@ mcp-template/
 
 Placeholders substituted during scaffold: `__MCP_SLUG__` (e.g. `weather-mcp`),
 `__MCP_NAME__` (`weather`), `__MCP_ENV_PREFIX__` (`WEATHER_`),
-`__MCP_DESCRIPTION__`.
+`__MCP_DESCRIPTION__`, `__MCP_PORT__`.
 
 ## License
 

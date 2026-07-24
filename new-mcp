@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """new-mcp — scaffold a new MCP server (Python FastMCP) and its standardized
-systemd user unit, wired through a shared supergateway install.
+systemd user unit. Python scaffolds serve streamable HTTP natively (FastMCP,
+in-process — no gateway, no per-session child processes); --stdio wraps a
+third-party stdio server through the shared patched supergateway install.
 
 Usage:
   new-mcp <name> <port> [options]
@@ -21,8 +23,10 @@ Options:
   --stdio CMD           Skip Python scaffold; wrap this literal stdio command.
   --tpm-creds           Add LoadCredentialEncrypted= line + secrets/ note.
   --env-file            Add EnvironmentFile=-<dir>/.env to the unit (node/3rd-party).
-  --session-timeout MS  supergateway --sessionTimeout. Default 300000 (5 min).
-  --memory-max VAL      systemd MemoryMax. Default 512M (MemorySwapMax=0 always set:
+  --session-timeout MS  supergateway --sessionTimeout (--stdio wraps only). Default 300000 (5 min).
+  --memory-max VAL      systemd MemoryMax. Default 512M native / 1G --stdio wrap
+                        (a gateway spawns one child per session, so bursts of
+                        parallel clients add up; MemorySwapMax=0 always set:
                         hitting the cap OOM-kills + restarts instead of swap-thrashing).
   --no-sync             Skip `uv sync` after scaffolding.
   --enable              `systemctl --user enable --now` the service after writing.
@@ -93,14 +97,15 @@ def used_ports() -> dict[int, str]:
     ports: dict[int, str] = {}
     if not SYSTEMD_USER.is_dir():
         return ports
-    pat = re.compile(r"--port\s+(\d+)")
+    # Gateway units carry `--port N`; native FastMCP units carry `MCP_PORT=N`.
+    pat = re.compile(r"--port\s+(\d+)|MCP_PORT=(\d+)")
     for unit in SYSTEMD_USER.glob("*.service"):
         try:
             text = unit.read_text()
         except OSError:
             continue
         for m in pat.finditer(text):
-            ports[int(m.group(1))] = unit.name
+            ports[int(m.group(1) or m.group(2))] = unit.name
     return ports
 
 
@@ -149,13 +154,21 @@ def build_unit(repl: dict[str, str], args, workdir: Path, stdio_cmd: str, node_b
         )
     if args.env_file:
         lines.append(f"EnvironmentFile=-{workdir}/.env")
-    lines += [
-        f"Environment={repl['__MCP_ENV_PREFIX__']}LOG_LEVEL=INFO",
-        (
+    lines.append(f"Environment={repl['__MCP_ENV_PREFIX__']}LOG_LEVEL=INFO")
+    if args.stdio:
+        lines.append(
             f'ExecStart={node_bin} {SUPERGATEWAY} --stdio "{stdio_cmd}" '
             f"--port {args.port} --host 0.0.0.0 --outputTransport streamableHttp "
             f"--stateful --sessionTimeout {args.session_timeout}"
-        ),
+        )
+    else:
+        lines += [
+            "Environment=MCP_TRANSPORT=http",
+            "Environment=MCP_HOST=0.0.0.0",
+            f"Environment=MCP_PORT={args.port}",
+            f"ExecStart={workdir}/.venv/bin/start",
+        ]
+    lines += [
         "KillMode=control-group",
         f"MemoryMax={args.memory_max}",
         "MemorySwapMax=0",
@@ -173,27 +186,31 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="new-mcp", add_help=True,
                                 description="Scaffold a new MCP server + systemd unit.")
     p.add_argument("name", help="server name, e.g. 'weather' (slug becomes <name>-mcp)")
-    p.add_argument("port", type=int, help="HTTP port for supergateway (bound 0.0.0.0; front with your LAN/VPN)")
+    p.add_argument("port", type=int, help="HTTP port (bound 0.0.0.0; front with your LAN/VPN)")
     p.add_argument("--description", default="")
     p.add_argument("--dir", default="")
     p.add_argument("--stdio", default="")
     p.add_argument("--tpm-creds", action="store_true")
     p.add_argument("--env-file", action="store_true")
     p.add_argument("--session-timeout", default="300000")
-    p.add_argument("--memory-max", default="512M")
+    p.add_argument("--memory-max", default="")
     p.add_argument("--no-sync", action="store_true")
     p.add_argument("--enable", action="store_true")
     p.add_argument("--force", action="store_true")
     p.add_argument("-n", "--dry-run", action="store_true")
     args = p.parse_args()
 
-    node_bin = resolve_tool("node")  # always needed: systemd runs supergateway via node
-    if not Path(SUPERGATEWAY).exists():
-        die(f"shared supergateway missing at {SUPERGATEWAY} "
-            f"— run mcp-common/bootstrap.sh (or set $MCP_COMMON_DIR)")
+    node_bin = ""
+    if args.stdio:  # only gateway wraps need node + the shared supergateway
+        node_bin = resolve_tool("node")
+        if not Path(SUPERGATEWAY).exists():
+            die(f"shared supergateway missing at {SUPERGATEWAY} "
+                f"— run mcp-common/bootstrap.sh (or set $MCP_COMMON_DIR)")
 
     slug, base, env_prefix = derive_names(args.name)
-    description = args.description or f"{base} MCP Gateway"
+    description = args.description or (
+        f"{base} MCP Gateway" if args.stdio else f"{base} MCP (native FastMCP HTTP)"
+    )
 
     # Port collision check.
     taken = used_ports()
@@ -203,6 +220,8 @@ def main() -> None:
         die(f"port {args.port} out of range")
 
     python_mode = not args.stdio
+    if not args.memory_max:
+        args.memory_max = "512M" if python_mode else "1G"
     uv_bin = ""
     if python_mode:
         if not SKELETON.is_dir():
@@ -223,14 +242,18 @@ def main() -> None:
         "__MCP_NAME__": base,
         "__MCP_ENV_PREFIX__": env_prefix,
         "__MCP_DESCRIPTION__": description,
+        "__MCP_PORT__": str(args.port),
     }
 
-    stdio_cmd = args.stdio or f"{uv_bin} run --directory {workdir} start"
+    stdio_cmd = args.stdio
 
-    print(f"new-mcp: {slug}  port={args.port}  mode={'python' if python_mode else 'stdio-wrap'}")
+    print(f"new-mcp: {slug}  port={args.port}  mode={'python-native' if python_mode else 'stdio-wrap'}")
     print(f"  workdir: {workdir}")
     print(f"  unit:    {unit_path}")
-    print(f"  stdio:   {stdio_cmd}")
+    if args.stdio:
+        print(f"  stdio:   {stdio_cmd}  (via shared supergateway)")
+    else:
+        print(f"  exec:    {workdir}/.venv/bin/start  (native streamable HTTP at /mcp)")
 
     # --- Safety: existing targets ---
     if python_mode and workdir.exists() and any(workdir.iterdir()) and not args.force:
@@ -281,7 +304,7 @@ def main() -> None:
     if not args.enable:
         print(f"  {step}. systemctl --user enable --now {slug}")
         step += 1
-    print(f"  {step}. Verify:  systemctl --user status {slug}  &&  curl -s localhost:{args.port}/")
+    print(f"  {step}. Verify:  systemctl --user status {slug}  &&  mcp-health")
 
 
 if __name__ == "__main__":

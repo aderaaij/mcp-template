@@ -1,11 +1,13 @@
 """__MCP_NAME__ MCP Server — main entry point.
 
-Wrapped by supergateway in production (stdio -> streamableHTTP) via the
-systemd user unit `__MCP_SLUG__.service`. Run it directly for local dev:
+Served natively over streamable HTTP in production (MCP_TRANSPORT=http in the
+systemd user unit `__MCP_SLUG__.service`; endpoint /mcp). Run it directly for
+local dev over stdio:
     uv run start
 """
 
 import logging
+import os
 from datetime import date
 
 from fastmcp import FastMCP
@@ -42,8 +44,21 @@ logger.info("__MCP_SLUG__ initialized. Configured: %s", settings.is_configured()
 
 
 def main() -> None:
-    """Entry point for the MCP server (stdio transport)."""
-    mcp.run()
+    """Entry point for the MCP server.
+
+    Default transport is stdio (direct clients, local dev). Set
+    MCP_TRANSPORT=http (with MCP_HOST / MCP_PORT) to serve streamable HTTP
+    natively — no gateway needed; point clients at http://<host>:<port>/mcp
+    """
+    transport = os.environ.get("MCP_TRANSPORT", "stdio").lower()
+    if transport in ("http", "streamable-http"):
+        mcp.run(
+            transport="http",
+            host=os.environ.get("MCP_HOST", "0.0.0.0"),
+            port=int(os.environ.get("MCP_PORT", "__MCP_PORT__")),
+        )
+    else:
+        mcp.run()
 
 
 if __name__ == "__main__":
